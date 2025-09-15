@@ -6,7 +6,7 @@ from _models import register_model
 from typing import List
 from torch.utils.data import DataLoader
 from _models._utils import BaseModel
-from _networks.vit_powder import ViTZoo
+from _networks.vit_prompt_coda import ViTZoo
 import os
 from utils.tools import str_to_bool
 import math

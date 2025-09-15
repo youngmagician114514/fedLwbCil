@@ -137,10 +137,18 @@ class SequentialTinyImageNet(BaseDataset):
 
     INPUT_SHAPE = (224, 224, 3)
 
+    def train_transform(self, x):
+        return TRANSFORMS[self.train_transf](x)
+
+    def test_transform(self, x):
+        return TRANSFORMS[self.test_transf](x)
+    
     def __init__(
         self,
         num_clients: int,
         batch_size: int,
+        train_transform: str = "default_train",
+        test_transform: str = "default_test",
         partition_mode: str = "distribution",
         distribution_alpha: float = 0.05,
         class_quantity: int = 4,
@@ -152,6 +160,8 @@ class SequentialTinyImageNet(BaseDataset):
             distribution_alpha,
             class_quantity,
         )
+        self.train_transf = train_transform
+        self.test_transf = test_transform
 
         for split in ["train", "test"]:
             dataset = MyTinyImageNet(
@@ -160,6 +170,8 @@ class SequentialTinyImageNet(BaseDataset):
                 download=True,
                 transform=getattr(self, f"{split.upper()}_TRANSFORM"),
             )
+            dataset.classes = [i for i in range(200)]                               # Added for LIVAR compatibility
+            dataset.class_to_idx = {cl: i for i, cl in enumerate(dataset.classes)}  # Added for LIVAR compatibility
             setattr(self, f"{split}_dataset", dataset)
 
         self._split_fcil(

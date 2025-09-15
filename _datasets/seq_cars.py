@@ -169,6 +169,8 @@ class SequentialCars(BaseDataset):
                 train=True if split == "train" else False,
                 transform=self.BASE_TRANSFORM,
             )
+            dataset.classes = [i for i in range(196)]                               # Added for LIVAR compatibility
+            dataset.class_to_idx = {cl: i for i, cl in enumerate(dataset.classes)}  # Added for LIVAR compatibility
             setattr(self, f"{split}_dataset", dataset)
 
         self._split_fcil(
