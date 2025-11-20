@@ -241,7 +241,7 @@ class BaseDataset:
                     getattr(self, f"{split}_data").append(task_data)
                     getattr(self, f"{split}_targets").append(task_targets)
 
-        print("Data split done")
+        print("Data split oos done")
 
     def _split_fcil(
         self,

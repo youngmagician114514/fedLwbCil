@@ -30,7 +30,7 @@ def set_random_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
+#* 创建cilent组件和dataset
 def get_artifacts(args: dict, fabric) -> Tuple[BaseModel, Dataset]:
     NetworkClass = network_factory(args["network"])
     DatasetClass = dataset_factory(args["dataset"])

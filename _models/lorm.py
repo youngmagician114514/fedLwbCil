@@ -269,6 +269,7 @@ class LoRM(Lora, RegMean):
                 keys = list(self.network.state_dict().keys())
                 if self.cur_train_matrix == "A":
                     # merge As, Bs are all the same
+                    print("Merging As")
                     cl_A = [client["cur_A"] for client in client_info]  # list of A matrices for all clients
                     for key in self.lora_keys:
                         if "weight" in key and self.middle_names.get(key) is not None and not "head" in key:
@@ -457,12 +458,12 @@ class LoRM(Lora, RegMean):
                     B = self.cur_B[key].to(self.device)
                     A = self.cur_A[key].to(self.device)
                     gram = grams[self.middle_names[key]].to(self.device)
-                    if self.run_weights_gram.get(key) is None:
+                    if self.run_weights_gram.get(key) is None:#*  W*X_T
                         self.run_weights_gram[key] = B @ A @ gram
                     else:
                         self.run_weights_gram[key] = self.run_weights_gram[key].to(self.device)
                         self.run_weights_gram[key] += B @ A @ gram
-                    if self.run_gram.get(key) is None:
+                    if self.run_gram.get(key) is None:#* X*X_T
                         self.run_gram[key] = gram
                     else:
                         self.run_gram[key] = self.run_gram[key].to(self.device)
