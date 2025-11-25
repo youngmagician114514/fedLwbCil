@@ -461,8 +461,16 @@ class TiesLora(BaseModel):
 
     def end_task_server(self, client_info: List[dict] = None):
         with torch.no_grad():
-            optimization_dict = deepcopy(self.network.state_dict())
+            optimization_dict = deepcopy(self.network.state_dict())#*这就是拷贝的原始预训练权重
             if getattr(self, "run_weights", None) is None:
+                # self.run_weights_A = {
+                #     key:[] for key in self.lora_keys
+                #     if "weight" in key and not "head" in key
+                # }
+                # self.run_weights_B = {
+                #     key:[] for key in self.lora_keys
+                #     if "weight" in key and not "head" in key
+                # }
                 self.run_weights = {
                     key:[] for key in self.lora_keys
                     if "weight" in key and not "head" in key
@@ -471,19 +479,36 @@ class TiesLora(BaseModel):
                 if "weight" in key and not "head" in key:
                     B = self.cur_B[key].to(self.device)
                     A = self.cur_A[key].to(self.device)            
-                    if self.run_weights.get(key) is None:
-                        self.run_weights[key].append(B @ A) 
-                    else:
-#                        self.run_weights[key] = self.run_weights[key].to(self.device)
-                        self.run_weights[key].append(B @ A )
+                    # self.run_weights_A[key].append(A) 
+                    # self.run_weights_B[key].append(B) 
+                    self.run_weights[key].append(B@A) 
+                    # if self.run_weights.get(key) is None:
+                    #     self.run_weights[key].append(B@A) 
+                    # else:
+                    #     self.run_weights[key] = self.run_weights[key].to(self.device)
+                    #     self.run_weights[key].append(B@A)
+
+                    
                     if self.cur_task > 0:
+                        # merge_task_weight_A= self.ties_merge_param(
+                        #     self.run_weights_A[key],
+                        #     norm_weights=None,#*是否加权？
+                        #     keep_ratio=self.ties_keep_ratio,
+                        #     lam=self.ties_lambda,
+                        # )
+                        # merge_task_weight_B= self.ties_merge_param(
+                        #     self.run_weights_B[key],
+                        #     norm_weights=None,#*是否加权？
+                        #     keep_ratio=self.ties_keep_ratio,
+                        #     lam=self.ties_lambda,
+                        # )  
                         merge_task_weight= self.ties_merge_param(
                             self.run_weights[key],
                             norm_weights=None,#*是否加权？
                             keep_ratio=self.ties_keep_ratio,
                             lam=self.ties_lambda,
-                        )
-                        optimization_dict[key] += merge_task_weight#*为什么是+=呢？这样不就相当于
+                        )                                                
+                        optimization_dict[key] += merge_task_weight#*预训练模型+合并后的AB矩阵
                         
             if self.cur_task > 0:
                 self.optimization_dict = optimization_dict
