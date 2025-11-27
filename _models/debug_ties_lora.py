@@ -31,7 +31,7 @@ def merge_AB(A, B, lora_ind):
     return T(zero_pad(delta_w, lora_ind))
 
 
-@register_model("ties_lora")
+@register_model("debug_ties_lora")
 class TiesLora(BaseModel):
     def __init__(
         self,
@@ -93,65 +93,6 @@ class TiesLora(BaseModel):
         self.pre_head = None
         self.pre_network = None
         # self.network.eval()
-
-
-    def ties_merge_param_with_w0(
-        self,
-        param_list,
-        weight_init,
-        keep_ratio: float = None,
-    ):
-        #*修剪时也参考预训练权重的大小，但是删去时只删去多余的部分,这是基于层进行ties的代码，后续看情况要不要改成完全整体修剪
-        assert len(param_list) > 0
-                    
-        stacked = torch.stack(param_list, dim=0)  # (N, ...)
-        device = stacked.device
-        dtype = stacked.dtype        
-        N = stacked.size(0)
-
-        if keep_ratio is None:
-            keep_ratio = self.ties_keep_ratio
-        keep_ratio = float(keep_ratio)
-        
-        stacked_with_w0 = stacked + weight_init.unsqueeze(0)
-        
-        # ---------- 1) Trim：每个任务向量自身做 top-k% 剪枝 ----------
-        flat = stacked_with_w0.reshape(N, -1)              # (N, D)
-        D = flat.size(1)
-
-        if keep_ratio <= 0.0:
-            trimmed_flat = torch.zeros_like(flat)
-        elif keep_ratio >= 1.0:
-            trimmed_flat = flat.clone()
-        else:
-            k = max(1, int(D * keep_ratio))
-            abs_flat = flat.abs()
-            # 对每个任务向量单独取 top-k
-            _, topk_idx = torch.topk(abs_flat, k, dim=1, largest=True, sorted=False)
-            keep_mask = torch.zeros_like(flat, dtype=torch.bool)
-            keep_mask.scatter_(1, topk_idx, True)
-            trimmed_flat = flat * keep_mask
-        
-        trimmed = trimmed_flat.view_as(stacked_with_w0)    # (N, ...)
-
-        # === Step 3. 符号方向判断（由约束决定） ===
-        mean_BA = stacked.mean(dim=0)  # 平均 (B@A)
-        positive_condition = mean_BA > (-weight_init)
-        keep_mask_condition = torch.where(
-        positive_condition,
-        stacked > (-weight_init),
-        stacked < (-weight_init),
-        ) 
-        
-        trimmed = torch.where(keep_mask_condition, trimmed, torch.zeros_like(trimmed))#*(trimmed是N*矩阵，为0的地方是0，不为0的地方是W0+B@A)
-
-        sum_vals = trimmed.sum(dim=0)#*若不为0，则是k*W0+B1A1+B2A2.....+BKAK
-        count = (trimmed != 0).sum(dim=0)#*count本身，上一行的k
-        delta = torch.zeros_like(sum_vals) 
-        nonzero_mask = count > 0
-        delta[nonzero_mask] = sum_vals[nonzero_mask] / count[nonzero_mask]- weight_init[nonzero_mask] 
-               
-        return delta
 
 
     def ties_merge_param(
@@ -521,49 +462,30 @@ class TiesLora(BaseModel):
     def end_task_server(self, client_info: List[dict] = None):
         with torch.no_grad():
             optimization_dict = deepcopy(self.network.state_dict())#*这就是拷贝的原始预训练权重
-            if getattr(self, "run_weights", None) is None:
-                self.run_weights_A = {
-                    key:[] for key in self.lora_keys
-                    if "weight" in key and not "head" in key
-                }
-                self.run_weights_B = {
-                    key:[] for key in self.lora_keys
-                    if "weight" in key and not "head" in key
-                }
-                self.run_weights = {
-                    key:[] for key in self.lora_keys
-                    if "weight" in key and not "head" in key
-                }
             for key in self.lora_keys:
                 if "weight" in key and not "head" in key:
                     B = self.cur_B[key].to(self.device)
-                    A = self.cur_A[key].to(self.device)            
-                    # self.run_weights_A[key].append(A) 
-                    # self.run_weights_B[key].append(B)
-                    task_weight_init= optimization_dict[key]
-                    self.run_weights[key].append(B@A) 
-
+                    A = self.cur_A[key].to(self.device)                             
+                    merge_task_weight=B@A
                     
-                    if self.cur_task > 0:
-                        # merge_task_weight_A= self.ties_merge_param(
-                        #     self.run_weights_A[key],
-                        #     norm_weights=None,#*是否加权？
-                        #     keep_ratio=self.ties_keep_ratio,
-                        #     lam=self.ties_lambda,
-                        # )
-                        # merge_task_weight_B= self.ties_merge_param(
-                        #     self.run_weights_B[key],
-                        #     norm_weights=None,#*是否加权？
-                        #     keep_ratio=self.ties_keep_ratio,
-                        #     lam=self.ties_lambda,
-                        # )  
-                        merge_task_weight= self.ties_merge_param_with_w0(
-                            param_list=self.run_weights[key],
-                            weight_init=task_weight_init,
-                            keep_ratio=self.ties_keep_ratio,
-                            
-                        )                                                
-                        optimization_dict[key] += merge_task_weight#*预训练模型+合并后的AB矩阵
+                    up_ratio=0.1
+                    down_ratio=0.3
+                    #*将merge_task_weight保留绝对值10%到30%的参数
+                    abs_weights = merge_task_weight.abs()
+                    flat_abs = abs_weights.flatten()  
+                                      
+                    upper_threshold= torch.quantile(flat_abs, 1-up_ratio)
+                    down_threshold=torch.quantile(flat_abs,1-down_ratio)
+                
+                    # 创建掩码：保留绝对值在 down_threshold 到 up_threshold 之间的元素
+                    mask = (abs_weights >= down_threshold) & (abs_weights <= upper_threshold)
+                
+                    # 应用掩码，其余置零
+                    merge_task_weight = merge_task_weight * mask.float()
+                                                                     
+                    optimization_dict[key] += merge_task_weight#*预训练模型+合并后的AB矩阵
+                    
+
                         
             if self.cur_task > 0:
                 self.optimization_dict = optimization_dict
