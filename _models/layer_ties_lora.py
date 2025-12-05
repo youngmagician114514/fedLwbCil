@@ -31,7 +31,7 @@ def merge_AB(A, B, lora_ind):
     return T(zero_pad(delta_w, lora_ind))
 
 
-@register_model("ties_lora")
+@register_model("layer_ties_lora")
 class TiesLora(BaseModel):
     def __init__(
         self,
@@ -241,134 +241,6 @@ class TiesLora(BaseModel):
         return merged
 
 
-
-    def _trim_single_task(self, param_dict, keep_ratio):
-        """修剪单个任务的所有层参数"""
-        trimmed_dict = {}
-        
-        for key in param_dict:
-            param = param_dict[key].detach()
-            shape = param.shape
-            flat = param.flatten()
-            D = flat.numel()
-            
-            if 0.0 < keep_ratio < 1.0:
-                k = max(1, int(D * keep_ratio))
-                abs_flat = flat.abs()
-                _, topk_idx = torch.topk(abs_flat, k, dim=0, largest=True, sorted=False)
-                
-                mask = torch.zeros_like(flat, dtype=torch.bool)
-                mask.scatter_(0, topk_idx, True)
-                trimmed_flat = flat * mask
-                trimmed_param = trimmed_flat.view(shape)
-            else:
-                trimmed_param = param if keep_ratio >= 1.0 else torch.zeros_like(param)
-            
-            trimmed_dict[key] = trimmed_param
-        
-        return trimmed_dict
-
-
-    def _merge_single_layer(self, layer_params, lam):
-        """合并单个层的所有修剪后参数"""
-        stacked = torch.stack(layer_params, dim=0)
-        dtype = stacked.dtype
-        
-        # 符号选举
-        sum_trimmed = stacked.sum(dim=0)
-        final_sign = sum_trimmed.sign()
-        
-        # 合并符号一致的参数
-        sign_trimmed = stacked.sign()
-        fs = final_sign.unsqueeze(0)
-        agree_mask = (sign_trimmed == fs) & stacked.ne(0)
-        
-        vals = stacked * agree_mask
-        sum_vals = vals.sum(dim=0)
-        count = agree_mask.sum(dim=0)
-        
-        merged = torch.zeros_like(final_sign, dtype=dtype)
-        nonzero_mask = count > 0
-        merged[nonzero_mask] = sum_vals[nonzero_mask] / count[nonzero_mask].float()
-        
-        # 应用缩放系数
-        if lam != 1.0:
-            merged = merged * lam
-        
-        return merged
-
-
-    def ties_merge_param_all(
-        self,
-        run_weights: dict,
-        keep_ratio: float = None,
-        lam: float = None,
-    ):
-        """
-        优化内存版本的TIES融合实现：
-        1. 逐个任务进行修剪
-        2. 按层存储修剪后参数（避免保存完整任务参数）
-        3. 逐层进行合并
-        """
-        if keep_ratio is None:
-            keep_ratio = self.ties_keep_ratio
-        keep_ratio = float(keep_ratio)
-        
-        if lam is None:
-            lam = self.ties_lambda
-        lam = float(lam)
-
-        layers = list(run_weights.keys())
-        if not layers:
-            return {}
-        
-        num_tasks = len(run_weights[layers[0]])
-        if num_tasks == 0:
-            return {key: torch.zeros_like(run_weights[key][0]) for key in run_weights}
-
-        # 初始化按层存储的字典
-        layer_based_storage = {key: [] for key in layers}
-        
-        # 1. 逐个任务修剪，并按层存储
-        for task_idx in range(num_tasks):
-            # 收集当前任务的所有层参数
-            task_params = {key: run_weights[key][task_idx] for key in layers}
-            
-            # 修剪单个任务
-            trimmed_dict = self._trim_single_task(task_params, keep_ratio)
-            
-            # 将修剪后的参数按层存储，而不是保存完整任务
-            for key in layers:
-                layer_based_storage[key].append(trimmed_dict[key])
-            
-            # 及时清理当前任务的参数，释放内存
-            del task_params
-            del trimmed_dict
-            torch.cuda.empty_cache()
-
-        # 2. 逐层合并
-        merged_params = {}
-        for key in layers:
-            # 获取该层的所有任务参数
-            layer_params = layer_based_storage[key]
-            
-            # 合并单个层
-            merged = self._merge_single_layer(layer_params, lam)
-            merged_params[key] = merged
-            
-            # 合并完成后立即清理该层的所有参数，释放内存
-            del layer_based_storage[key]
-            del layer_params
-            torch.cuda.empty_cache()
-
-        # 清理存储字典
-        del layer_based_storage
-        torch.cuda.empty_cache()
-
-        return merged_params
-            
-    
-
     def init_lora_params(self, network, r):
         for name, param in network.named_parameters():
             param.requires_grad = False  # freeze all the parameters
@@ -495,7 +367,7 @@ class TiesLora(BaseModel):
 
     def begin_task(self, n_classes_per_task: int):
         super().begin_task(n_classes_per_task)
-        if self.cur_task > 0:#*修改为11不启用old_delta
+        if self.cur_task > 0:
             if self.cl_merge == "run_sum":
                 for key in self.lora_keys:
                     self.old_delta[key] += self.cur_B[key].detach() @ self.cur_A[key].detach()
@@ -605,7 +477,6 @@ class TiesLora(BaseModel):
             self.network.load_state_dict(sd)
 
     def end_round_server(self, client_info: List[dict]):
-        total_mem = torch.cuda.get_device_properties(0).total_memory
         if self.avg_type == "weighted":
             total_samples = sum([client["num_train_samples"] for client in client_info])
             norm_weights = [client["num_train_samples"] / total_samples for client in client_info]
@@ -646,22 +517,19 @@ class TiesLora(BaseModel):
                 self.cur_A[key] = nn.Parameter(merged_A)
 
             self.set_optimization()
-            if torch.cuda.memory_reserved() / total_mem > 0.3:#*记得修改比例
-                torch.cuda.empty_cache()
 
-            
     def end_task_server(self, client_info: List[dict] = None):
         with torch.no_grad():
             optimization_dict = deepcopy(self.network.state_dict())#*这就是拷贝的原始预训练权重
             if getattr(self, "run_weights", None) is None:
-                # self.run_weights_A = {
-                #     key:[] for key in self.lora_keys
-                #     if "weight" in key and not "head" in key
-                # }
-                # self.run_weights_B = {
-                #     key:[] for key in self.lora_keys
-                #     if "weight" in key and not "head" in key
-                # }
+                self.run_weights_A = {
+                    key:[] for key in self.lora_keys
+                    if "weight" in key and not "head" in key
+                }
+                self.run_weights_B = {
+                    key:[] for key in self.lora_keys
+                    if "weight" in key and not "head" in key
+                }
                 self.run_weights = {
                     key:[] for key in self.lora_keys
                     if "weight" in key and not "head" in key
@@ -672,28 +540,35 @@ class TiesLora(BaseModel):
                     A = self.cur_A[key].to(self.device)            
                     # self.run_weights_A[key].append(A) 
                     # self.run_weights_B[key].append(B)
-                    self.run_weights[key].append(B@A.detach().to(self.device)) 
-                    del B,A
+                    task_weight_init= optimization_dict[key]
+                    self.run_weights[key].append(B@A) 
 
                     
-            if self.cur_task > 0:
-                merge_task_weight= self.ties_merge_param_all(
-                    run_weights=self.run_weights,
-                    keep_ratio=self.ties_keep_ratio,
-                    lam=self.ties_lambda,
-                )    
+                    if self.cur_task > 0:
+                        # merge_task_weight_A= self.ties_merge_param(
+                        #     self.run_weights_A[key],
+                        #     norm_weights=None,#*是否加权？
+                        #     keep_ratio=self.ties_keep_ratio,
+                        #     lam=self.ties_lambda,
+                        # )
+                        # merge_task_weight_B= self.ties_merge_param(
+                        #     self.run_weights_B[key],
+                        #     norm_weights=None,#*是否加权？
+                        #     keep_ratio=self.ties_keep_ratio,
+                        #     lam=self.ties_lambda,
+                        # )  
+                        merge_task_weight= self.ties_merge_param_with_w0(
+                            param_list=self.run_weights[key],
+                            weight_init=task_weight_init,
+                            keep_ratio=self.ties_keep_ratio,
                             
-                for key in self.lora_keys:                                    
-                    optimization_dict[key] += merge_task_weight[key].detach()#*预训练模型+合并后的AB矩阵
-                    
-                del merge_task_weight
+                        )                                                
+                        optimization_dict[key] += merge_task_weight#*预训练模型+合并后的AB矩阵
                         
             if self.cur_task > 0:
                 self.optimization_dict = optimization_dict
         
         print("my task merge")
-
-
 
 
     def to(self, device="cpu"):
