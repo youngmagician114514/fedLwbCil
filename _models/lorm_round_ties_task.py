@@ -46,9 +46,12 @@ class LoRM_Round_TIES_Task(Lora, RegMean):
         train_matrix: str = "alt",
         regmean_rounds: int = 1,
         ties_keep_ratio: float = 0.5,
+        ties_lambda = 1.0,
     ) -> None:
         self.is_server = False
         self.regmean_rounds = regmean_rounds
+        self.ties_keep_ratio=ties_keep_ratio
+        self.ties_lambda=ties_lambda
         lr_back = lr_B if lr_B > 0 else lr
         Lora.__init__(
             self,
@@ -434,6 +437,60 @@ class LoRM_Round_TIES_Task(Lora, RegMean):
         self.gram_modules = real_modules
         self.to("cpu", only_trainable=False)
         return {"grams": self.features}
+
+    def _trim_single_task(self, param_dict, keep_ratio):
+        """修剪单个任务的所有层参数"""
+        trimmed_dict = {}
+        
+        for key in param_dict:
+            param = param_dict[key].detach()
+            shape = param.shape
+            flat = param.flatten()
+            D = flat.numel()
+            
+            if 0.0 < keep_ratio < 1.0:
+                k = max(1, int(D * keep_ratio))
+                abs_flat = flat.abs()
+                _, topk_idx = torch.topk(abs_flat, k, dim=0, largest=True, sorted=False)
+                
+                mask = torch.zeros_like(flat, dtype=torch.bool)
+                mask.scatter_(0, topk_idx, True)
+                trimmed_flat = flat * mask
+                trimmed_param = trimmed_flat.view(shape)
+            else:
+                trimmed_param = param if keep_ratio >= 1.0 else torch.zeros_like(param)
+            
+            trimmed_dict[key] = trimmed_param
+        
+        return trimmed_dict
+
+    def _merge_single_layer(self, layer_params, lam):
+        """合并单个层的所有修剪后参数"""
+        stacked = torch.stack(layer_params, dim=0)
+        dtype = stacked.dtype
+        
+        # 符号选举
+        sum_trimmed = stacked.sum(dim=0)
+        final_sign = sum_trimmed.sign()
+        
+        # 合并符号一致的参数
+        sign_trimmed = stacked.sign()
+        fs = final_sign.unsqueeze(0)
+        agree_mask = (sign_trimmed == fs) & stacked.ne(0)
+        
+        vals = stacked * agree_mask
+        sum_vals = vals.sum(dim=0)
+        count = agree_mask.sum(dim=0)
+        
+        merged = torch.zeros_like(final_sign, dtype=dtype)
+        nonzero_mask = count > 0
+        merged[nonzero_mask] = sum_vals[nonzero_mask] / count[nonzero_mask].float()
+        
+        # 应用缩放系数
+        if lam != 1.0:
+            merged = merged * lam
+        
+        return merged
 
     def ties_merge_param_all(
         self,
